@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700;900&display=swap');
+
+@theme {
+  --font-sans: "M PLUS Rounded 1c", "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  @apply overflow-hidden touch-none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent text selection */
+* {
+  user-select: none;
+  -webkit-user-select: none;
+}
