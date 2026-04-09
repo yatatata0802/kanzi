@@ -4,22 +4,23 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, Clock, Star, Play, RotateCcw, Zap } from 'lucide-react';
+import { motion, AnimatePresence, useAnimation } from 'motion/react';
+import { Trophy, Clock, Star, Play, RotateCcw, Zap, Target, Award, Sparkles } from 'lucide-react';
+import confetti from 'canvas-confetti';
+
+// --- Visual Constants ---
+const COLORS = {
+  primary: '#00D1FF', // Electric Blue
+  secondary: '#FF007A', // Neon Pink
+  accent: '#FFD600', // Cyber Yellow
+  bg: '#0F172A', // Deep Space
+  surface: '#1E293B',
+  text: '#F8FAFC',
+};
 
 /// 小学1・2年生の漢字データ
 const KANJI_DATA = [
   // 1年生
-  { kanji: '一', readings: ['ひと'], distractors: ['に', 'さん'], grade: 1 },
-  { kanji: '二', readings: ['ふた'], distractors: ['いち', 'さん'], grade: 1 },
-  { kanji: '三', readings: ['み'], distractors: ['に', 'よん'], grade: 1 },
-  { kanji: '四', readings: ['よん'], distractors: ['さん', 'ご'], grade: 1 },
-  { kanji: '五', readings: ['いつ'], distractors: ['よん', 'ろく'], grade: 1 },
-  { kanji: '六', readings: ['む'], distractors: ['ご', 'なな'], grade: 1 },
-  { kanji: '七', readings: ['なな'], distractors: ['ろく', 'はち'], grade: 1 },
-  { kanji: '八', readings: ['や'], distractors: ['なな', 'きゅう'], grade: 1 },
-  { kanji: '九', readings: ['ここの'], distractors: ['はち', 'じゅう'], grade: 1 },
-  { kanji: '十', readings: ['とお'], distractors: ['きゅう', 'いち'], grade: 1 },
   { kanji: '日', readings: ['ひ'], distractors: ['つき', 'ほし'], grade: 1 },
   { kanji: '月', readings: ['つき'], distractors: ['ひ', 'ほし'], grade: 1 },
   { kanji: '火', readings: ['ひ'], distractors: ['みず', 'き'], grade: 1 },
@@ -200,12 +201,14 @@ export default function App() {
   const [gameState, setGameState] = useState<GameState>('START');
   const [score, setScore] = useState(0);
   const [streak, setStreak] = useState(0);
+  const [maxStreak, setMaxStreak] = useState(0);
   const [timeLeft, setTimeLeft] = useState(60);
   const [currentQuestion, setCurrentQuestion] = useState(KANJI_DATA[0]);
   const [masteredKanji, setMasteredKanji] = useState<Set<string>>(new Set());
   const [moles, setMoles] = useState<Mole[]>(
     Array.from({ length: 4 }, (_, i) => ({ id: i, text: '', isCorrect: false, isVisible: false }))
   );
+  const controls = useAnimation();
 
   const [showReadings, setShowReadings] = useState(true);
 
@@ -232,20 +235,35 @@ export default function App() {
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const spawnRef = useRef<NodeJS.Timeout | null>(null);
+  const moleTimeouts = useRef<Record<number, NodeJS.Timeout>>({});
 
   const startGame = () => {
     setScore(0);
     setStreak(0);
+    setMaxStreak(0);
     setTimeLeft(60);
     setGameState('PLAYING');
     pickNewQuestion();
+    
+    confetti({
+      particleCount: 100,
+      spread: 70,
+      origin: { y: 0.6 },
+      colors: [COLORS.primary, COLORS.secondary, COLORS.accent]
+    });
+  };
+
+  const shakeScreen = async () => {
+    await controls.start({
+      x: [-10, 10, -10, 10, 0],
+      transition: { duration: 0.2 }
+    });
   };
 
   const pickNewQuestion = useCallback(() => {
     const randomQuestion = KANJI_DATA[Math.floor(Math.random() * KANJI_DATA.length)];
     setCurrentQuestion(randomQuestion);
 
-    // 選択肢の準備（正解1つ + 誤答3つ）
     const correctReading = randomQuestion.readings[Math.floor(Math.random() * randomQuestion.readings.length)];
     const distractorPool = [...randomQuestion.distractors];
     while (distractorPool.length < 3) {
@@ -260,12 +278,18 @@ export default function App() {
       ...distractorPool.slice(0, 3).map(d => ({ text: d, isCorrect: false }))
     ].sort(() => Math.random() - 0.5);
 
-    setMoles(prev => prev.map((m, i) => ({
-      ...m,
-      text: shuffledOptions[i].text,
-      isCorrect: shuffledOptions[i].isCorrect,
-      isVisible: false
-    })));
+    setMoles(prev => {
+      // 全てのタイムアウトをクリア
+      Object.values(moleTimeouts.current).forEach(clearTimeout);
+      moleTimeouts.current = {};
+      
+      return prev.map((m, i) => ({
+        ...m,
+        text: shuffledOptions[i].text,
+        isCorrect: shuffledOptions[i].isCorrect,
+        isVisible: false
+      }));
+    });
   }, []);
 
   const spawnMole = useCallback(() => {
@@ -275,36 +299,49 @@ export default function App() {
       const invisibleMoles = prevMoles.filter((m) => !m.isVisible);
       if (invisibleMoles.length === 0) return prevMoles;
 
-      // ユーザーの要望「答えがですぎ」に応え、出現率を調整
-      // 画面に正解がない場合でも、30%の確率でしか正解を優先しない（あとは完全ランダム）
-      const correctMole = prevMoles.find(m => m.isCorrect);
-      let targetMole;
-      if (correctMole && !correctMole.isVisible && Math.random() < 0.3) {
-        targetMole = correctMole;
-      } else {
-        targetMole = invisibleMoles[Math.floor(Math.random() * invisibleMoles.length)];
+      // 同時に出現する数はランダム（40%の確率で2つ、それ以外は1つ）
+      const numToSpawn = Math.random() < 0.4 && invisibleMoles.length >= 2 ? 2 : 1;
+      const targets: Mole[] = [];
+      
+      let currentInvisible = [...invisibleMoles];
+      for (let i = 0; i < numToSpawn; i++) {
+        if (currentInvisible.length === 0) break;
+        
+        // 完全にランダムに出現させる（正解の優先度を廃止）
+        const idx = Math.floor(Math.random() * currentInvisible.length);
+        const target = currentInvisible[idx];
+        
+        targets.push(target);
+        currentInvisible = currentInvisible.filter(m => m.id !== target.id);
       }
 
       const newMoles = prevMoles.map((m) =>
-        m.id === targetMole.id ? { ...m, isVisible: true } : m
+        targets.some(t => t.id === m.id) ? { ...m, isVisible: true } : m
       );
 
-      // 難易度調整: スコアが上がるほど消えるのが早くなる
-      const baseDuration = Math.max(800, 2000 - (score * 20));
-      const duration = baseDuration + Math.random() * 500;
+      // 表示時間をさらに延長（3秒〜5秒程度）し、タイムアウトの衝突を防ぐ
+      targets.forEach(target => {
+        if (moleTimeouts.current[target.id]) {
+          clearTimeout(moleTimeouts.current[target.id]);
+        }
 
-      setTimeout(() => {
-        setMoles((current) =>
-          current.map((m) => (m.id === targetMole.id ? { ...m, isVisible: false } : m))
-        );
-      }, duration);
+        const baseDuration = Math.max(3000, 5000 - (score * 5));
+        const duration = baseDuration + Math.random() * 1000;
+
+        moleTimeouts.current[target.id] = setTimeout(() => {
+          setMoles((current) =>
+            current.map((m) => (m.id === target.id ? { ...m, isVisible: false } : m))
+          );
+          delete moleTimeouts.current[target.id];
+        }, duration);
+      });
 
       return newMoles;
     });
 
-    // 難易度調整: スコアが上がるほど次が出るのが早くなる
-    const baseSpawnTime = Math.max(400, 1000 - (score * 15));
-    const nextSpawnTime = baseSpawnTime + Math.random() * 800;
+    // 次の出現までの間隔を少し広げる（ゆったりさせる）
+    const baseSpawnTime = Math.max(800, 1500 - (score * 10));
+    const nextSpawnTime = baseSpawnTime + Math.random() * 1000;
     spawnRef.current = setTimeout(spawnMole, nextSpawnTime);
   }, [gameState, score]);
 
@@ -324,70 +361,104 @@ export default function App() {
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
       if (spawnRef.current) clearTimeout(spawnRef.current);
+      Object.values(moleTimeouts.current).forEach(clearTimeout);
+      moleTimeouts.current = {};
     }
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (spawnRef.current) clearTimeout(spawnRef.current);
+      Object.values(moleTimeouts.current).forEach(clearTimeout);
+      moleTimeouts.current = {};
     };
   }, [gameState, spawnMole]);
 
   const handleMoleClick = (mole: Mole, e: React.MouseEvent) => {
     if (!mole.isVisible) return;
 
+    // クリックされたモグラのタイムアウトをクリア
+    if (moleTimeouts.current[mole.id]) {
+      clearTimeout(moleTimeouts.current[mole.id]);
+      delete moleTimeouts.current[mole.id];
+    }
+
     const rect = (e.target as HTMLElement).getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top;
 
     if (mole.isCorrect) {
-      const bonus = streak >= 5 ? 2 : 1;
-      setScore((prev) => prev + bonus);
-      setStreak((prev) => prev + 1);
-      setFeedback({ x, y, text: bonus > 1 ? `+${bonus} ボーナス!` : '+1', color: 'text-yellow-500' });
+      setScore((prev) => {
+        const next = prev + 1;
+        // 10問ごとにコンフェッティでお祝い
+        if (next % 10 === 0) {
+          confetti({ particleCount: 100, spread: 160 });
+        }
+        return next;
+      });
+
+      setStreak((prev) => {
+        const next = prev + 1;
+        if (next > maxStreak) setMaxStreak(next);
+        return next;
+      });
+
+      const feedbackText = 'せいかい！';
+      const feedbackColor = 'text-cyan-400';
       
-      // 正解した漢字を記録
       setMasteredKanji(prev => {
         const next = new Set(prev);
         next.add(currentQuestion.kanji);
         return next;
       });
 
-      pickNewQuestion(); // 正解したらお題を変える
+      pickNewQuestion();
+      setFeedback({ x, y, text: feedbackText, color: feedbackColor });
     } else {
-      setScore((prev) => Math.max(0, prev - 1));
+      shakeScreen();
+      setFeedback({ x, y, text: 'ざんねん！', color: 'text-rose-500' });
       setStreak(0);
-      setFeedback({ x, y, text: '-1', color: 'text-red-500' });
     }
 
-    // 叩いたもぐらを消す
     setMoles((prev) => prev.map((m) => (m.id === mole.id ? { ...m, isVisible: false } : m)));
-
     setTimeout(() => setFeedback(null), 800);
   };
 
   return (
-    <div className="h-screen bg-sky-100 font-sans text-slate-800 flex flex-col items-center justify-center p-2 md:p-4 select-none overflow-hidden">
+    <motion.div 
+      animate={controls}
+      className={`h-screen font-sans text-slate-100 flex flex-col items-center justify-center p-2 md:p-4 select-none overflow-hidden transition-all duration-1000 bg-slate-950`}
+    >
+      {/* Dynamic Grid Background */}
+      <div className="absolute inset-0 opacity-20 pointer-events-none overflow-hidden">
+        <div className="absolute inset-0" style={{ backgroundImage: `radial-gradient(${COLORS.primary}22 1px, transparent 0)`, backgroundSize: '40px 40px' }} />
+        <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-fuchsia-500/10" />
+      </div>
+
       {/* Header Stats */}
       {gameState === 'PLAYING' && (
-        <div className="absolute top-2 left-0 right-0 flex justify-around items-center z-10 px-2">
-          <div className="bg-white/90 backdrop-blur rounded-full px-4 py-1 shadow-md flex items-center gap-2 border-2 border-sky-400">
-            <Clock className="text-sky-500 w-5 h-5" />
-            <span className="text-xl font-bold tabular-nums">{timeLeft}s</span>
+        <div className="absolute top-4 left-0 right-0 flex flex-col items-center z-10 px-6 max-w-4xl mx-auto w-full gap-4">
+          <div className="flex justify-between w-full items-center">
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2 bg-slate-800/80 backdrop-blur-md px-4 py-2 rounded-xl border border-slate-700 shadow-xl">
+                <Clock className={`w-5 h-5 ${timeLeft < 10 ? 'text-rose-500 animate-pulse' : 'text-cyan-400'}`} />
+                <span className={`text-2xl font-black tabular-nums ${timeLeft < 10 ? 'text-rose-500' : 'text-white'}`}>{timeLeft}s</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col items-center">
+              <div className={`px-8 py-2 rounded-2xl border-2 shadow-2xl flex flex-col items-center min-w-[140px] bg-slate-800/80 border-slate-700 text-white`}>
+                <span className="text-xs font-bold uppercase tracking-widest opacity-70">せいかい数</span>
+                <span className="text-4xl font-black tabular-nums">{score}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex items-center gap-2 bg-slate-800/80 backdrop-blur-md px-4 py-2 rounded-xl border border-slate-700 shadow-xl">
+                <Zap className={`w-5 h-5 ${streak > 0 ? 'text-yellow-400 fill-yellow-400' : 'text-slate-500'}`} />
+                <span className="text-2xl font-black tabular-nums">{streak}</span>
+              </div>
+            </div>
           </div>
-          <div className="bg-white/90 backdrop-blur rounded-full px-4 py-1 shadow-md flex items-center gap-2 border-2 border-yellow-400">
-            <Star className="text-yellow-500 w-5 h-5" />
-            <span className="text-xl font-bold tabular-nums">{score}</span>
-          </div>
-          {streak >= 3 && (
-            <motion.div 
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              className="bg-orange-500 text-white rounded-full px-3 py-1 shadow-md flex items-center gap-1 border border-white"
-            >
-              <Zap className="w-3 h-3 fill-current" />
-              <span className="text-sm font-bold">{streak} れんぞく！</span>
-            </motion.div>
-          )}
         </div>
       )}
 
@@ -396,120 +467,146 @@ export default function App() {
         {gameState === 'START' && (
           <motion.div
             key="start"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className="text-center bg-white p-6 rounded-3xl shadow-2xl border-8 border-sky-400 max-w-sm w-full"
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.2 }}
+            className="text-center z-20"
           >
-            <h1 className="text-3xl font-black text-sky-600 mb-4 leading-tight">
-              漢字<br />もぐらたたき
-            </h1>
-            <div className="bg-sky-50 p-4 rounded-2xl mb-6 text-base font-medium text-sky-800">
-              <p className="mb-1">漢字を見て、正しい</p>
-              <p className="text-xl font-bold text-orange-500">読み方を叩こう！</p>
+            <motion.div
+              animate={{ y: [0, -10, 0] }}
+              transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
+            >
+              <h1 className="text-7xl md:text-9xl font-black mb-2 tracking-tighter italic">
+                <span className="text-transparent bg-clip-text bg-gradient-to-b from-cyan-400 to-blue-600">かんじ</span>
+                <br />
+                <span className="text-transparent bg-clip-text bg-gradient-to-b from-fuchsia-400 to-rose-600">たたき！</span>
+              </h1>
+            </motion.div>
+            
+            <p className="text-slate-400 font-bold tracking-[0.3em] uppercase mb-4 text-sm">くんよみを おぼえよう</p>
+
+            {/* Mastery Bar */}
+            <div className="max-w-xs mx-auto mb-12">
+              <div className="flex justify-between text-[10px] font-black text-slate-500 uppercase mb-2 tracking-widest">
+                <span>どれくらい おぼえたかな</span>
+                <span>{Math.round((masteredKanji.size / KANJI_DATA.length) * 100)}%</span>
+              </div>
+              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden border border-slate-700">
+                <motion.div 
+                  initial={{ width: 0 }}
+                  animate={{ width: `${(masteredKanji.size / KANJI_DATA.length) * 100}%` }}
+                  className="h-full bg-gradient-to-r from-cyan-500 to-fuchsia-500"
+                />
+              </div>
             </div>
-            <button
-              onClick={startGame}
-              className="group relative bg-orange-500 hover:bg-orange-600 text-white text-2xl font-black py-4 px-10 rounded-full shadow-[0_6px_0_rgb(194,65,12)] active:shadow-none active:translate-y-1 transition-all flex items-center gap-3 mx-auto mb-4"
-            >
-              <Play className="w-6 h-6 fill-current" />
-              スタート！
-            </button>
-            <button
-              onClick={() => setGameState('COLLECTION')}
-              className="text-sky-600 font-bold flex items-center gap-2 mx-auto hover:underline"
-            >
-              <Star className="w-5 h-5 fill-current" />
-              かんじコレクション
-            </button>
+
+            <div className="flex flex-col gap-4 max-w-xs mx-auto">
+              <button
+                onClick={startGame}
+                className="group relative bg-white text-slate-950 text-2xl font-black py-6 px-12 rounded-2xl shadow-[0_8px_0_#cbd5e1] hover:shadow-[0_4px_0_#cbd5e1] hover:translate-y-[4px] active:shadow-none active:translate-y-[8px] transition-all flex items-center justify-center gap-3 overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-r from-cyan-400/20 to-fuchsia-400/20 opacity-0 group-hover:opacity-100 transition-opacity" />
+                <Play className="w-6 h-6 fill-current" />
+                あそぶ
+              </button>
+              
+              <button
+                onClick={() => setGameState('COLLECTION')}
+                className="bg-slate-800/50 hover:bg-slate-800 text-slate-300 font-bold py-4 rounded-xl border border-slate-700 transition-all flex items-center justify-center gap-2"
+              >
+                <Award className="w-5 h-5" />
+                あつめた かんじ
+              </button>
+            </div>
           </motion.div>
         )}
 
         {gameState === 'COLLECTION' && (
           <motion.div
             key="collection"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className="bg-white p-6 rounded-3xl shadow-2xl border-8 border-sky-400 w-full max-w-2xl max-h-[85vh] flex flex-col"
+            initial={{ opacity: 0, y: 100 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 100 }}
+            className="bg-slate-900 p-8 rounded-[2rem] shadow-2xl border border-slate-700 w-full max-w-4xl max-h-[85vh] flex flex-col z-20 relative overflow-hidden"
           >
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-2xl font-black text-sky-600 flex items-center gap-2">
-                <Star className="w-6 h-6 fill-sky-500" />
-                かんじコレクション
-              </h2>
+            {/* Background Glow */}
+            <div className="absolute -top-24 -right-24 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl" />
+            
+            <div className="flex justify-between items-center mb-8 relative">
+              <div>
+                <h2 className="text-4xl font-black text-white tracking-tight flex items-center gap-3">
+                  <Award className="w-10 h-10 text-cyan-400" />
+                  かんじ ずかん
+                </h2>
+                <p className="text-slate-500 font-bold text-sm mt-1 uppercase tracking-widest">どれくらい おぼえたかな</p>
+              </div>
               <button
                 onClick={() => setGameState('START')}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full transition-colors flex items-center gap-2 font-bold"
+                className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl transition-all flex items-center gap-2 font-black border border-slate-600"
               >
-                <RotateCcw className="w-4 h-4" />
+                <RotateCcw className="w-5 h-5" />
                 もどる
               </button>
             </div>
 
-            <div className="flex flex-wrap gap-4 mb-4 text-sm font-bold items-center">
-              <div className="flex items-center gap-1">
-                <div className="w-3 h-3 bg-orange-400 rounded-sm" />
-                <span>おぼえた！</span>
+            <div className="flex flex-wrap gap-6 mb-8 text-xs font-black items-center relative">
+              <div className="flex items-center gap-2 bg-slate-800/50 px-3 py-1.5 rounded-lg border border-slate-700">
+                <div className="w-3 h-3 bg-cyan-400 rounded-full shadow-[0_0_8px_#22d3ee]" />
+                <span className="text-slate-300">おぼえた</span>
               </div>
-              <div className="flex items-center gap-1">
-                <div className="w-3 h-3 bg-slate-100 border border-slate-300 rounded-sm" />
-                <span>まだだよ</span>
+              <div className="flex items-center gap-2 bg-slate-800/50 px-3 py-1.5 rounded-lg border border-slate-700">
+                <div className="w-3 h-3 bg-slate-700 rounded-full" />
+                <span className="text-slate-500">まだだよ</span>
               </div>
-              <div className="ml-auto flex items-center gap-2">
+              
+              <div className="ml-auto flex items-center gap-4">
                 <button
                   onClick={() => setShowReadings(!showReadings)}
-                  className={`px-3 py-1 rounded-full text-xs transition-all flex items-center gap-1 ${
-                    showReadings ? 'bg-sky-500 text-white' : 'bg-slate-200 text-slate-600'
+                  className={`px-4 py-2 rounded-xl transition-all font-black border ${
+                    showReadings ? 'bg-cyan-500 border-cyan-400 text-white shadow-[0_0_15px_rgba(34,211,238,0.3)]' : 'bg-slate-800 border-slate-700 text-slate-400'
                   }`}
                 >
-                  {showReadings ? '読みをかくす' : '読みをだす'}
+                  {showReadings ? 'よみを かくす' : 'よみを だす'}
                 </button>
-                <div className="text-sky-600">
-                  {masteredKanji.size} / {KANJI_DATA.length}
+                <div className="text-2xl font-black text-white bg-slate-800 px-4 py-1 rounded-xl border border-slate-700">
+                  <span className="text-cyan-400">{masteredKanji.size}</span>
+                  <span className="text-slate-600 mx-1">/</span>
+                  <span className="text-slate-400">{KANJI_DATA.length}</span>
                 </div>
               </div>
-              <button
-                onClick={() => {
-                  if (confirm('これまでのおぼえたデータを ぜんぶけしますか？')) {
-                    setMasteredKanji(new Set());
-                  }
-                }}
-                className="text-slate-300 hover:text-red-400 transition-colors ml-2"
-                title="データをリセット"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
             </div>
 
-            <div className="overflow-y-auto flex-1 pr-2 custom-scrollbar">
-              <div className="space-y-6">
+            <div className="overflow-y-auto flex-1 pr-4 custom-scrollbar relative">
+              <div className="space-y-12">
                 {[1, 2].map(grade => (
                   <div key={grade}>
-                    <h3 className="text-lg font-black text-slate-500 mb-3 border-b-2 border-slate-100 pb-1">
-                      {grade}年生の かんじ
+                    <h3 className="text-xl font-black text-slate-400 mb-6 flex items-center gap-3">
+                      <span className="w-8 h-8 bg-slate-800 rounded-lg flex items-center justify-center text-sm border border-slate-700">{grade}</span>
+                      {grade}ねんせいの かんじ
                     </h3>
-                    <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
+                    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-3">
                       {KANJI_DATA.filter(k => k.grade === grade).map(item => {
                         const isMastered = masteredKanji.has(item.kanji);
                         return (
-                          <div
+                          <motion.div
                             key={item.kanji}
-                            className={`flex flex-col items-center justify-center py-2 rounded-xl border-2 transition-all ${
+                            whileHover={{ scale: 1.05, y: -2 }}
+                            className={`flex flex-col items-center justify-center py-4 rounded-2xl border-2 transition-all relative group ${
                               isMastered 
-                                ? 'bg-orange-50 border-orange-400 text-orange-600 shadow-sm' 
-                                : 'bg-slate-50 border-slate-200 text-slate-400'
+                                ? 'bg-slate-800 border-cyan-500/50 text-white shadow-lg' 
+                                : 'bg-slate-900/50 border-slate-800 text-slate-700'
                             }`}
                           >
-                            <span className="text-2xl font-black leading-none mb-1">{item.kanji}</span>
+                            {isMastered && <Sparkles className="absolute -top-1 -right-1 w-4 h-4 text-cyan-400 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                            <span className={`text-3xl font-black leading-none mb-2 ${isMastered ? 'text-white' : 'text-slate-800'}`}>{item.kanji}</span>
                             {showReadings && (
-                              <span className={`text-[10px] font-bold px-1 rounded ${
-                                isMastered ? 'bg-orange-200/50' : 'bg-slate-200/50 text-slate-500'
+                              <span className={`text-[10px] font-black px-2 py-0.5 rounded-md tracking-tighter ${
+                                isMastered ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-700'
                               }`}>
-                                {item.readings.join('・')}
+                                {item.readings[0]}
                               </span>
                             )}
-                          </div>
+                          </motion.div>
                         );
                       })}
                     </div>
@@ -526,48 +623,52 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="w-full max-w-2xl flex flex-col items-center gap-4 md:gap-6"
+            className="w-full max-w-4xl flex flex-col items-center gap-12 relative"
           >
             {/* Question Display */}
-            <div className="bg-white px-8 pt-10 pb-6 rounded-3xl shadow-lg border-4 border-sky-400 text-center relative mt-4">
-              <div className="absolute -top-5 left-1/2 -translate-x-1/2 bg-sky-400 text-white px-5 py-1.5 rounded-full text-base font-bold whitespace-nowrap shadow-sm">
-                この漢字の読み方は？
+            <div className="relative">
+              <div className={`bg-slate-900/80 backdrop-blur-xl px-16 py-12 rounded-[3rem] shadow-[0_0_50px_rgba(0,0,0,0.5)] border-2 border-slate-700 text-center relative`}>
+                <div className={`absolute -top-4 left-1/2 -translate-x-1/2 px-6 py-1.5 rounded-full text-xs font-black uppercase tracking-[0.2em] whitespace-nowrap shadow-lg bg-cyan-500 text-slate-950`}>
+                  この かんじを よもう
+                </div>
+                <motion.h2 
+                  key={currentQuestion.kanji}
+                  initial={{ scale: 0.5, opacity: 0, rotate: -10 }}
+                  animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                  className={`text-9xl md:text-[12rem] font-black leading-none drop-shadow-[0_0_30px_rgba(255,255,255,0.2)] text-white`}
+                >
+                  {currentQuestion.kanji}
+                </motion.h2>
               </div>
-              <motion.h2 
-                key={currentQuestion.kanji}
-                initial={{ scale: 0.8, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                className="text-7xl md:text-8xl font-black text-slate-700 leading-none"
-              >
-                {currentQuestion.kanji}
-              </motion.h2>
             </div>
 
             {/* Game Grid */}
-            <div className="grid grid-cols-2 gap-4 md:gap-8 w-full max-w-md px-4">
+            <div className="grid grid-cols-2 gap-6 md:gap-12 w-full max-w-lg px-4">
               {moles.map((mole) => (
-                <div key={mole.id} className="relative aspect-square">
-                  {/* Hole */}
-                  <div className="absolute bottom-0 left-0 right-0 h-1/3 bg-slate-800/20 rounded-[100%] shadow-inner" />
+                <div key={mole.id} className="relative aspect-square group">
+                  {/* Cyber Hole */}
+                  <div className="absolute bottom-0 left-0 right-0 h-1/2 bg-slate-950 rounded-[100%] shadow-[inset_0_0_20px_rgba(0,0,0,0.8)] border-b-4 border-slate-800" />
+                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 w-3/4 h-1/4 bg-cyan-500/5 rounded-full blur-xl group-hover:bg-cyan-500/10 transition-colors" />
                   
                   {/* Mole/Kanji */}
                   <AnimatePresence>
                     {mole.isVisible && (
                       <motion.button
-                        initial={{ y: 80, scale: 0.5 }}
-                        animate={{ y: 0, scale: 1 }}
-                        exit={{ y: 80, scale: 0.5 }}
+                        initial={{ y: 120, scale: 0.8, rotate: -5 }}
+                        animate={{ y: 0, scale: 1, rotate: 0 }}
+                        exit={{ y: 120, scale: 0.8, opacity: 0 }}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.9, y: 10 }}
                         onClick={(e) => handleMoleClick(mole, e)}
-                        className="absolute inset-0 flex items-center justify-center rounded-full text-2xl md:text-3xl font-black shadow-lg border-4 transition-transform active:scale-90 bg-amber-500 border-amber-300 text-white px-1 text-center break-all"
-                        style={{ zIndex: 5 }}
+                        className={`absolute inset-0 flex items-center justify-center rounded-3xl text-3xl md:text-5xl font-black shadow-2xl border-4 transition-all z-20 overflow-hidden bg-slate-100 border-white text-slate-900`}
                       >
-                        {mole.text}
+                        <span className="relative z-10 drop-shadow-md">{mole.text}</span>
                       </motion.button>
                     )}
                   </AnimatePresence>
 
-                  {/* Hole Rim */}
-                  <div className="absolute bottom-0 left-0 right-0 h-1/4 bg-amber-800 rounded-b-3xl border-t-4 border-amber-900/20" style={{ zIndex: 10 }} />
+                  {/* Hole Rim Decoration */}
+                  <div className="absolute bottom-0 left-0 right-0 h-1/6 bg-slate-800 rounded-b-3xl border-t-2 border-slate-700 z-10" />
                 </div>
               ))}
             </div>
@@ -577,40 +678,59 @@ export default function App() {
         {gameState === 'RESULT' && (
           <motion.div
             key="result"
-            initial={{ opacity: 0, scale: 0.9 }}
+            initial={{ opacity: 0, scale: 0.5 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="text-center bg-white p-10 rounded-3xl shadow-2xl border-8 border-yellow-400 max-w-md w-full"
+            className="text-center bg-slate-900 p-12 rounded-[3rem] shadow-2xl border-2 border-slate-700 max-w-xl w-full z-20 relative overflow-hidden"
           >
-            <Trophy className="w-20 h-20 text-yellow-500 mx-auto mb-4" />
-            <h2 className="text-3xl font-black text-slate-700 mb-2">タイムアップ！</h2>
-            <p className="text-slate-500 mb-6">きみのスコアは...</p>
+            <div className="absolute -top-24 -left-24 w-64 h-64 bg-fuchsia-500/10 rounded-full blur-3xl" />
             
-            <div className="text-7xl font-black text-orange-500 mb-8 drop-shadow-sm">
-              {score}
-              <span className="text-2xl ml-2">てん</span>
+            <motion.div
+              initial={{ rotate: -20, scale: 0 }}
+              animate={{ rotate: 0, scale: 1 }}
+              transition={{ type: "spring", damping: 10 }}
+            >
+              <Trophy className="w-24 h-24 text-yellow-400 mx-auto mb-6 drop-shadow-[0_0_20px_rgba(251,191,36,0.4)]" />
+            </motion.div>
+            
+            <h2 className="text-5xl font-black text-white mb-2 italic tracking-tighter">おつかれさま！</h2>
+            <p className="text-slate-500 font-bold uppercase tracking-widest mb-12">がんばったね！</p>
+            
+            <div className="grid grid-cols-2 gap-6 mb-12">
+              <div className="bg-slate-800/50 p-6 rounded-2xl border border-slate-700">
+                <span className="block text-slate-500 text-xs font-black uppercase mb-1">せいかい数</span>
+                <span className="text-5xl font-black text-cyan-400">{score}</span>
+              </div>
+              <div className="bg-slate-800/50 p-6 rounded-2xl border border-slate-700">
+                <span className="block text-slate-500 text-xs font-black uppercase mb-1">れんぞくせいかい</span>
+                <span className="text-5xl font-black text-rose-400">{maxStreak}</span>
+              </div>
             </div>
 
-            <div className="space-y-4">
+            <div className="flex flex-col gap-4">
               <button
                 onClick={startGame}
-                className="w-full bg-sky-500 hover:bg-sky-600 text-white text-2xl font-bold py-4 px-8 rounded-2xl shadow-[0_6px_0_rgb(3,105,161)] active:shadow-none active:translate-y-1 transition-all flex items-center justify-center gap-2"
+                className="w-full bg-white text-slate-950 text-2xl font-black py-6 rounded-2xl shadow-[0_8px_0_#cbd5e1] hover:shadow-[0_4px_0_#cbd5e1] hover:translate-y-[4px] active:shadow-none active:translate-y-[8px] transition-all flex items-center justify-center gap-3"
               >
                 <RotateCcw className="w-6 h-6" />
-                もういっかい！
+                もういちど あそぶ
               </button>
-              <button
-                onClick={() => setGameState('COLLECTION')}
-                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 text-xl font-bold py-4 px-8 rounded-2xl transition-colors flex items-center justify-center gap-2"
-              >
-                <Star className="w-6 h-6 fill-current" />
-                コレクションをみる
-              </button>
-              <button
-                onClick={() => setGameState('START')}
-                className="w-full text-slate-400 text-base font-bold py-2 hover:underline"
-              >
-                タイトルにもどる
-              </button>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <button
+                  onClick={() => setGameState('COLLECTION')}
+                  className="bg-slate-800 hover:bg-slate-700 text-white font-black py-4 rounded-xl border border-slate-700 transition-all flex items-center justify-center gap-2"
+                >
+                  <Award className="w-5 h-5" />
+                  あつめた かんじ
+                </button>
+                <button
+                  onClick={() => setGameState('START')}
+                  className="bg-slate-800 hover:bg-slate-700 text-white font-black py-4 rounded-xl border border-slate-700 transition-all flex items-center justify-center gap-2"
+                >
+                  <Target className="w-5 h-5" />
+                  さいしょに もどる
+                </button>
+              </div>
             </div>
           </motion.div>
         )}
@@ -620,23 +740,17 @@ export default function App() {
       <AnimatePresence>
         {feedback && (
           <motion.div
-            initial={{ opacity: 0, y: feedback.y, x: feedback.x - 50 }}
-            animate={{ opacity: 1, y: feedback.y - 100 }}
-            exit={{ opacity: 0 }}
-            className={`fixed z-50 text-3xl font-black pointer-events-none ${feedback.color}`}
-            style={{ left: feedback.x, top: feedback.y }}
+            initial={{ opacity: 0, y: feedback.y, scale: 0.5 }}
+            animate={{ opacity: 1, y: feedback.y - 150, scale: 1.5 }}
+            exit={{ opacity: 0, scale: 2 }}
+            className={`fixed z-50 text-4xl font-black pointer-events-none italic tracking-tighter drop-shadow-lg ${feedback.color}`}
+            style={{ left: feedback.x - 50, top: feedback.y }}
           >
             {feedback.text}
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Background Decoration */}
-      <div className="fixed inset-0 pointer-events-none -z-10 opacity-20">
-        <div className="absolute top-10 left-10 w-32 h-32 bg-yellow-300 rounded-full blur-3xl" />
-        <div className="absolute bottom-20 right-10 w-48 h-48 bg-sky-300 rounded-full blur-3xl" />
-        <div className="absolute top-1/2 left-1/4 w-24 h-24 bg-pink-300 rounded-full blur-3xl" />
-      </div>
-    </div>
+    </motion.div>
   );
 }
